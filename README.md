@@ -33,4 +33,9 @@ datasetMaker/
   vLLM API Server (8000) – Qwen2.5-VL-7B-Instruct
 ```
 
+## 访问说明
+
+- 本机访问时默认使用 `http://localhost:8080`
+- 如果通过局域网 IP 访问 Label Studio，请在仓库根目录创建 `.env`，并设置 `LABEL_STUDIO_HOST=http://<你的主机IP>:8080`，然后重新执行 `docker compose up -d`
+
 详见 [ml_backend/README.md](ml_backend/README.md)。
