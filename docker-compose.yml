@@ -1,0 +1,139 @@
+version: "3.9"
+
+# ---------------------------------------------------------------------------
+# datasetMaker – Full-stack docker-compose
+#
+# Services
+# --------
+#   postgres      – persistent store for Label Studio projects & annotations
+#   minio         – S3-compatible object store for raw images
+#   label-studio  – annotation UI (port 8080)
+#   ml-backend    – Label Studio ML Backend / AI adapter (port 9090)
+#   vllm          – vLLM OpenAI-compatible Vision API server (port 8000)
+#                   ⚠ Requires a GPU-enabled Docker runtime.
+#                     Comment out or replace with a CPU stub for local dev.
+# ---------------------------------------------------------------------------
+
+networks:
+  dataset-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  minio-data:
+  label-studio-data:
+
+services:
+  # ---------------------------------------------------------------------- postgres
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    networks: [dataset-net]
+    environment:
+      POSTGRES_USER: labelstudio
+      POSTGRES_PASSWORD: labelstudio
+      POSTGRES_DB: labelstudio
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U labelstudio"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------- minio
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    networks: [dataset-net]
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # MinIO Console
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ---------------------------------------------------------------------- label-studio
+  label-studio:
+    image: heartexlabs/label-studio:latest
+    restart: unless-stopped
+    networks: [dataset-net]
+    ports:
+      - "8080:8080"
+    environment:
+      DJANGO_DB: default
+      POSTGRE_NAME: labelstudio
+      POSTGRE_USER: labelstudio
+      POSTGRE_PASSWORD: labelstudio
+      POSTGRE_HOST: postgres
+      POSTGRE_PORT: "5432"
+      LABEL_STUDIO_HOST: http://localhost:8080
+    volumes:
+      - label-studio-data:/label-studio/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------- ml-backend
+  ml-backend:
+    build:
+      context: ./ml_backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    networks: [dataset-net]
+    ports:
+      - "9090:9090"
+    environment:
+      # vLLM
+      VLLM_BASE_URL: http://vllm:8000/v1
+      VLLM_MODEL: Qwen/Qwen2.5-VL-7B-Instruct
+      VLLM_TIMEOUT: "120"
+      VLLM_TEMPERATURE: "0.0"
+      VLLM_MAX_TOKENS: "1024"
+      # MinIO
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_REGION: us-east-1
+      # ML Backend
+      ML_BACKEND_PORT: "9090"
+      DEBUG: "false"
+    depends_on:
+      - minio
+      - vllm
+
+  # ---------------------------------------------------------------------- vllm
+  # ⚠  This service requires an NVIDIA GPU and the NVIDIA Container Toolkit.
+  #    See https://docs.vllm.ai/en/latest/deployment/docker.html
+  #
+  #    For CPU-only development you can replace this with a simple echo
+  #    server or a smaller GGUF model via llama.cpp.
+  vllm:
+    image: vllm/vllm-openai:latest
+    restart: unless-stopped
+    networks: [dataset-net]
+    ports:
+      - "8000:8000"
+    environment:
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+    command:
+      - "--model"
+      - "Qwen/Qwen2.5-VL-7B-Instruct"
+      - "--enforce-eager"
+      - "--max-model-len"
+      - "4096"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
